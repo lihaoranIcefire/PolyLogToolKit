@@ -11,6 +11,6 @@ md_style.css
 .venv
 
 # source files
-./src/PolyLogToolKit.py
-./PolyLogToolKit.nb
-./doc/jlscript_doc.typ
+src/PolyLogToolKit.py
+PolyLogToolKit.nb
+doc/jlscript_doc.typ
