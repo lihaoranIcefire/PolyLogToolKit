@@ -1,0 +1,16 @@
+# vscode settings
+.vscode/
+
+# apple configs
+.DS_Store
+
+# css styling file
+md_style.css
+
+# environments
+.venv
+
+# source files
+./src/PolyLogToolKit.py
+./PolyLogToolKit.nb
+./doc/jlscript_doc.typ
