@@ -1,47 +1,34 @@
 
 module LogToolKit
 
-# export some structs and functions as global
-export
+using Combinatorics
+
+export # export structs and functions as global
     Symb, ISymb, HSymb, Li,
     monomial, lincomb, polynomial, tensor, Phi, Phi_inv, fundamental_column, complementary_entry, VariationMatrix,
-    ordered_partitions, findfirst_subsequence, latex_repr
+    ordered_partitions, findfirst_subsequence, latex_repr, MonodromyMatrixEntry, MonodromyMatrix
 
-using LaTeXStrings
-using Latexify
-using Combinatorics
+
+####################################################################################################
+# Helper functions
+####################################################################################################
 
 """
     ordered_partitions(n, k, positive=true)
 
-Return the all (positive) ordered k-partitions of an integer of n, implemented on top of partitions
-
-```julia
-julia> ordered_partitions(5, 2)
-6-element Vector{Vector{Int64}}:
- [6, 1]
- [1, 6]
- [5, 2]
- [2, 5]
- [4, 3]
- [3, 4]
-
-julia> ordered_partitions(5, 2, positive=false)
-6-element Vector{Vector{Int64}}:
- [5, 0]
- [0, 5]
- [4, 1]
- [1, 4]
- [3, 2]
- [2, 3]
-```
+Return the all ordered k-partitions of an integer of n, above a minimal value
 """
-function ordered_partitions(n::Int, k::Int; positive=true)::Vector{Vector{Int}}
-    if positive # only positive partitions
-        return union((unique(permutations(unordered_partition)) for unordered_partition in partitions(n + k, k))...)
-    else # all non-negative partitions
-        return [partition .- 1 for partition in ordered_partitions(n, k)] # implemented on top of the positive case
+function ordered_partitions(n::Int, k::Int; minval::Int=1)
+    if k == 1 # no partition
+        return [[n]]
     end
+    result = Vector{Vector{Int}}()
+    for i in minval:(n - minval*(k-1)) # all possible first entry
+        for tail in ordered_partitions(n - i, k - 1; minval=minval) # all possible tails
+            push!(result, [i; tail...])
+        end
+    end
+    return result
 end
 
 """
@@ -58,128 +45,57 @@ julia> findfirst_subsequence((1,1,2,3,4,3),[1,3])
 julia> findfirst_subsequence((1,1,2,3,4,3),(1,5))
 ```
 """
-function findfirst_subsequence(A::Union{Tuple{Vararg{T}}, Vector{T}}, B::Union{Tuple{Vararg{T}}, Vector{T}}) where T
+function findfirst_subsequence(A::Union{Tuple{Vararg{T}}, Vector{T}},
+                               B::Union{Tuple{Vararg{T}}, Vector{T}}) where T
     A, B = collect(A), collect(B) # If A is a range, generator, or other iterable, collect(A) produces a concrete Array containing all elements
     indices = Int[0] # the matching indices, the last element is supposed to be the last matching index, which initalizes to 0 as there is no matching index yet
     for b in B
         ind = findfirst(a -> a == b, A[indices[end]+1:end]) # find the next matching index
-        if ind == nothing # if nothing found, then it fails, and return nothing
-            indices = nothing
-            break
+        if isnothing(ind) # if nothing found, then it fails, return nothing
+            return nothing
         end
         push!(indices, indices[end] + ind) # push the newly matched index
     end
 
-    return indices == nothing ? nothing : indices[2:end] # doesn't include 0 of course
+    return indices[2:end] # doesn't include 0 of course
 end
-
-"""
-    latex_repr
-
-return the latex representation of Number, Matrix, or any type that has a `latex_repr` field
-
-```julia
-julia> latex_repr([[1,2],[3,4]])
-"\\begin{bmatrix}\\begin{bmatrix}1 \\\\ 2\\end{bmatrix} \\\\ \\begin{bmatrix}3 \\\\ 4\\end{bmatrix}\\end{bmatrix}"
-
-julia> latex_repr(ISymb(0,0,1))
-"I(a_{0},a_{1})"
-
-julia> latex_repr([ISymb(0,0,1), ISymb(0,1,2)])
-"\\begin{bmatrix}I(a_{0},a_{1}) \\\\ I(a_{0},a_{2})\\end{bmatrix}"
-```
-"""
-function latex_repr(expr)
-    if expr isa Rational
-        if denominator(expr)==1
-            return string(expr)
-        else
-            return "\\frac{" * latex_repr(numerator(expr)) * "}{" * latex_repr(denominator(expr)) * "}"
-        end
-    elseif expr isa Number
-        return string(expr)
-    elseif expr isa Vector || expr isa Tuple
-        return "\\begin{bmatrix}" * join(map(latex_repr, expr), " \\\\ ") * "\\end{bmatrix}"
-    elseif expr isa Matrix
-        m, n = size(expr)
-        return "\\begin{bmatrix}" * join([join(map(latex_repr, row), " & ") for row in eachrow(expr)], " \\\\ ") * "\\end{bmatrix}"
-    elseif :latex_repr in fieldnames(typeof(expr))
-        return expr.latex_repr # simply return its latex_repr attribute
-    else
-        throw(ArgumentError("No LaTeX representations!"))
-    end
-end
-
-
 
 """
     monomial{T}
 
-Monomials with variables in type T, where T must be a comparable type that has the `latex_repr` attribute
-
-```julia
-julia> monomial{ISymb}((ISymb(0,0,1),2), (ISymb(0,1,2),-1)).latex_repr
-"I(a_{0},a_{1})^{2}I(a_{0},a_{2})^{-1}"
-
-julia> monomial{ISymb}(ISymb(0,1,2)).latex_repr
-"I(a_{0},a_{2})"
-```
+Monomials with variables in type T, where T must be a comparable type
 """
-struct monomial{T} # T must be comparable type that has the latex_repr attribute
+
+####################################################################################################
+# Abstract algebraic constructions
+####################################################################################################
+
+struct monomial{T} # T must be comparable type
     args::Tuple{Vararg{Pair{T, Int}}} # variables and their exponents
     deg::Int
-    latex_repr::String
 end
 
 function monomial{T}(args::Vararg{Union{Tuple{T, Int}, Pair{T, Int}, T}}) where T
-    # multiply the variables
     counter = Dict{T, Int}()
-    for var in args
-        (key, value) = typeof(var) <: T ? (var, 1) : var
-        counter[key] = get(counter, key, 0) + value
+    for var in args # multiply the variables
+        key, value = var isa T ? (var, 1) : var
+        counter[key] = get(counter, key, 0) + value # add value to counter, 0 for default
     end
+    args = Tuple( sort( filter(x->x.second!=0, collect(counter)) ) ) # filter and sort variables
+    isempty(args) && return 1
+    deg = sum(last, args) # sum the second exponents for degree
 
-    # sort the variables
-    args = Tuple(sort(filter(x->x.second!=0, collect(counter))))
-
-    # return 1 when the args is empty
-    if length(args) == 0
-        return 1
-    end
-
-    # compute the degree of the monomial
-    deg = sum([exponent for (_, exponent) in args])
-
-    # generate latex_repr
-    latex_repr = ""
-    for (var, exponent) in args
-        if exponent == 1
-            latex_repr *= "$(var.latex_repr)"
-        else
-            latex_repr *= "$(var.latex_repr)^{$(exponent)}"
-        end
-    end
-
-    return monomial{T}(args, deg, latex_repr)
+    return monomial{T}(args, deg)
 end
 
 """
     lincomb{T}
 
-Linear/affine combination with terms in type T, where T must be a comparable type that has the `latex_repr` attribute
-
-```julia
-julia> lincomb{ISymb}(ISymb(0,1,2)).latex_repr
-"I(a_{0},a_{2})"
-
-julia> lincomb{ISymb}((ISymb(0,0,1),2), (ISymb(0,1,2),-1)).latex_repr
-"(2)I(a_{0},a_{1})+(-1)I(a_{0},a_{2})"
-```
+Linear/affine combinations with terms in type T, where T must be a comparable type
 """
 struct lincomb{T}
-    args::Tuple{Vararg{Pair{T, Number}}} # variable and coefficient, coef is in the second argument to ease the sorting
+    args::Tuple{Vararg{Pair{T, Number}}} # variable and coefficient, coef is put as the second argument to ease sorting
     intercept::Number # constant term
-    latex_repr::String
 end
 
 """
@@ -190,36 +106,15 @@ A polynomial in T is a linear/affine combination of monomials in T
 polynomial{T} = lincomb{Union{T, monomial{T}}}
 
 function lincomb{T}(args::Vararg{Union{T, Tuple{T, Number}, Pair{T, Number}}}; intercept=0) where T
-    # combine like terms
     counter = Dict{T, Number}()
-    for term in args
-        (key, value) = typeof(term) <: T ? (term, 1) : term
-        counter[key] = get(counter, key, 0) + value
+    for term in args # combine like terms
+        (key, value) = term isa T ? (term, 1) : term
+        counter[key] = get(counter, key, 0) + value # add value to counter, 0 for default
     end
+    args = Tuple( sort( filter(x->x.second!=0, collect(counter)) ) ) # filter and sort variables
+    isempty(args) && return 1
 
-    # sort the terms
-    args = Tuple(sort(filter(x->x.second!=0, collect(counter))))
-
-    # return the intercept when the args is empty
-    if length(args) == 0
-        return intercept
-    end
-
-    # generate latex_repr
-    argstr = String[]
-    if intercept != 0
-        push!(argstr, "($intercept)")
-    end
-    for term in args
-        if term.second == 1
-            push!(argstr, term.first.latex_repr)
-        else
-            push!(argstr, "($(term.second))" * term.first.latex_repr)
-        end
-    end
-    latex_repr = join(argstr, '+')
-
-    return lincomb{T}(args, intercept, latex_repr)
+    return lincomb{T}(args, intercept)
 end
 
 """
@@ -229,7 +124,6 @@ single tensor in type T, where T must be a comparable type that has the `latex_r
 """
 struct tensor{T} # T must be a type that has the latex_repr attribute
     args::Tuple{Vararg{T}}
-    latex_repr::String
 end
 """
     tensors{T}
@@ -240,12 +134,12 @@ tensors{T} = lincomb{Union{T, tensor{T}}}
 
 # constructor for tensor{T}
 function tensor{T}(args::Vararg{T}) where T
-    if length(args) == 0
+    if isempty(args)
         return 1
     elseif length(args) == 1
         return args[1]
     else
-        return tensor{T}(args, join(map(x -> x.latex_repr, args), "\\otimes "))
+        return tensor{T}(args)
     end
 end
 
@@ -340,44 +234,26 @@ struct ISymb <: Symb
     m::Int
     i::Function
     n::Function
-    latex_repr::String
 
     function ISymb(args::Vararg{Int})
-        # Validate the number of arguments
-        if length(args) % 2 == 0 || length(args) < 3
+        if iseven(length(args))|| length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
 
         m = div(length(args), 2) - 1
         i(r) = args[1 + 2 * r]
         n(r) = args[2 + 2 * r]
-        argstrs = String[]
 
-        # Check the validity of arguments
-        if m < 0 || any(n(r) < 1 for r in 1:m)
+        if m < 0 || any(n(r) < 1 for r in 1:m) # Check the validity of arguments
             throw(ArgumentError("The arguments are not valid"))
         end
 
-        # Form the latex string
-        for r in 0:m
-            push!(argstrs, "a_{$(i(r))}")
-            if n(r) == 2
-                push!(argstrs, "0")
-            elseif n(r) > 2
-                push!(argstrs, "0^{$(n(r)-1)}")
-            end
-        end
-        push!(argstrs, "a_{$(i(m+1))}")
-
-        # Return the final object
-        return new(args, sum(n(r) for r in 0:m) - 1, m, i, n, "I($(join(argstrs, ',')))")
+        return new(args, sum(n(r) for r in 0:m) - 1, m, i, n)
     end
 end
 
 Base.isless(a::ISymb, b::ISymb) = begin
-    if a.weight != b.weight
-        return a.weight < b.weight
-    end
+    a.weight != b.weight && return a.weight < b.weight
 
     for r in 0: a.m-1
         if a.i(a.m-r) != b.i(b.m-r)
@@ -406,11 +282,9 @@ struct HSymb <: Symb
     i::Tuple{Vararg{Int}}
     m::Function
     n::Function
-    latex_repr::String
 
     function HSymb(args::Vararg{Int})
-        # Validate the number of arguments
-        if length(args) % 2 == 0 || length(args) < 3
+        if iseven(length(args)) || length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
 
@@ -419,22 +293,14 @@ struct HSymb <: Symb
         m(r) = r == 0 ? 0 : args[2 * r - 1]
         n(r) = r == 0 ? 1 : args[2 * r]
         weight = n(1)==0 ? 1 : sum(n(r) for r in 1:d)
-        argstrs = String[]
-        indices = Int64[]
 
         # Check the validity of arguments
         if d <= 0 || any(m(r) < 1 for r in 1:d+1) || n(1)<0 || (d > 1 && any(n(r) < 1 for r in 1:d))
             throw(ArgumentError("The arguments are not valid"))
         end
 
-        # Form the latex string
-        for r in 1:d
-            push!(argstrs, "x_{$(i[r])\\to $(i[r+1])}")
-            push!(indices, n(r))
-        end
-
         # Return the final object
-        return new(args, weight, d, i, m, n, "[$(join(argstrs, ','))]_{$(join(indices, ','))}")
+        return new(args, weight, d, i, m, n)
     end
 end
 
@@ -449,9 +315,10 @@ julia> Li((1,1,2),(2:3,3:5,5)).latex_repr
 """
 function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRange{Int}}}})::HSymb
     # turn Int into UnitRange
-    x_args = Tuple(map(x -> x isa Int ? UnitRange{Int}(x,x+1) : x, x_args))
+    x_args = map(x -> x isa Int ? UnitRange{Int}(x,x+1) : x,
+                x_args) |> Tuple
     # examine the arguments
-    if length(n_args) == 0
+    if isempty(n_args)
         throw(ArgumentError("The depth must be positive"))
     elseif length(n_args) != length(x_args)
         throw(ArgumentError("The depth is not in accordance with the x variables"))
@@ -468,11 +335,8 @@ function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRang
 end
 
 Base.isless(a::HSymb, b::HSymb) = begin
-    if a.weight != b.weight
-        return a.weight < b.weight
-    elseif a.i[end] != b.i[end]
-        return a.i[end] < b.i[end]
-    end
+    a.weight != b.weight && return a.weight < b.weight
+    a.i[end] != b.i[end] && return a.i[end] < b.i[end]
 
     for r in 0: a.d-1
         if a.m(a.d-r) != b.m(b.d-r)
@@ -483,6 +347,81 @@ Base.isless(a::HSymb, b::HSymb) = begin
     end
 
     return false
+end
+
+"""
+    latex_repr
+
+return the latex representation of an object
+
+```julia
+julia> latex_repr([[1,2],[3,4]])
+"\\begin{bmatrix}\\begin{bmatrix}1 \\\\ 2\\end{bmatrix} \\\\ \\begin{bmatrix}3 \\\\ 4\\end{bmatrix}\\end{bmatrix}"
+
+julia> latex_repr(ISymb(0,0,1))
+"I(a_{0},a_{1})"
+
+julia> latex_repr([ISymb(0,0,1), ISymb(0,1,2)])
+"\\begin{bmatrix}I(a_{0},a_{1}) \\\\ I(a_{0},a_{2})\\end{bmatrix}"
+```
+"""
+function latex_repr(expr)
+    if expr isa Rational # expr is a rational expression
+        if denominator(expr)==1 # denominator as an integer is never negative, hence really integral
+            return string(expr)
+        else # real fractional
+            return "\\frac{" *
+                    latex_repr(numerator(expr)) *
+                    "}{" *
+                    latex_repr(denominator(expr)) *
+                    "}"
+        end
+
+    elseif expr isa Vector || expr isa Tuple
+        return "\\begin{bmatrix}" *
+                join(map(latex_repr, expr), " \\\\ ") * # entries divided by '\\'
+                "\\end{bmatrix}"
+
+    elseif expr isa Matrix
+        m, n = size(expr)
+        return "\\begin{bmatrix}" *
+                join([join(map(latex_repr, row), " & ") # entries connected by '&'
+                    for row in eachrow(expr)], " \\\\ ") * # rows divided by '\\'
+                "\\end{bmatrix}"
+
+    elseif expr isa monomial
+        return join([latex_repr(v) * (e == 1 ? "" : "^{$e}") # exponent = 1 is omitted
+                    for (v, e) in expr.args])
+
+    elseif expr isa lincomb
+        result = join([
+                    (t.second == 1 ? "" : "($(t.second))") * latex_repr(t.first) # coef = 1 is omitted
+                    for t in expr.args
+                    ], '+')
+        return (expr.intercept==0 ? "" : "($(expr.intercept))+") * result # intercept = 0 is omitted
+
+    elseif expr isa tensor
+        return join(map(x -> latex_repr(x), expr.args), "\\otimes ") # join by otimes
+
+    elseif expr isa ISymb
+        argstrs = [
+            "a_{$(expr.i(r))}" * (expr.n(r) == 2 ? ",0" : expr.n(r) > 2 ? ",0^{$(expr.n(r)-1)}" : "")
+            for r in 0:expr.m
+        ]
+        push!(argstrs, "a_{$(expr.i(expr.m+1))}") # add a_{i_{m+1}} at the end
+        return "I($(join(argstrs, ',')))"
+
+    elseif expr isa HSymb
+        argstrs = ["x_{$(expr.i[r])\\to $(expr.i[r+1])}" for r in 1:expr.d]
+        indices = [expr.n(r) for r in 1:expr.d]
+        return "[$(join(argstrs, ','))]_{$(join(indices, ','))}"
+
+    elseif expr isa Number
+        return string(expr)
+
+    else throw(ArgumentError("No LaTeX representations!"))
+
+    end
 end
 
 function partial_differential(H::HSymb, r::Int)
@@ -504,12 +443,11 @@ function Phi(I::Union{Number, ISymb, monomial{ISymb}, polynomial{ISymb}}, d::Int
         return I.intercept + sum(map(x -> x.second * Phi(x.first, d), I.args))
     end
 
-    # check i_{m+1} <= d + 1
-    if d + 1 < I.i(I.m+1)
+    if d + 1 < I.i(I.m+1) # check i_{m+1} <= d + 1
         throw(ArgumentError("The depth is invalid"))
     end
 
-    if I.m == 0 && I.n(1) == 1
+    if I.m == 0 && I.n(0) == 1
         return 1
 
     elseif I.i(0) == 0 && I.i(I.m+1) == 0
@@ -531,7 +469,7 @@ function Phi(I::Union{Number, ISymb, monomial{ISymb}, polynomial{ISymb}}, d::Int
         return sum(
             (-1)^(I.n(0)+I.m-1) * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
             * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-            for p in ordered_partitions(I.n(0)-1, I.m; positive = false)
+            for p in ordered_partitions(I.n(0)-1, I.m; minval = 0)
         )
 
     elseif I.i(0) == 0 && I.i(I.m+1) > 0
@@ -539,7 +477,7 @@ function Phi(I::Union{Number, ISymb, monomial{ISymb}, polynomial{ISymb}}, d::Int
             sum(
                 (-1)^(I.n(0)+p0+I.m-1) * HSymb(I.i(I.m+1),1,d+1)^p0 * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
                 * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-                for p in ordered_partitions(I.n(0)-1-p0, I.m; positive = false)
+                for p in ordered_partitions(I.n(0)-1-p0, I.m; minval = 0)
             )
             for p0 in 0:I.n(0)-1
         )
@@ -601,9 +539,7 @@ function complementary_entry(a::Union{HSymb, Int}, b::Union{HSymb, Int})
 
     # q_r sequence
     qr = findfirst_subsequence(map(j, 0:l+1), map(i, 0:k+1))
-    if qr == nothing
-        return 0
-    end
+    isnothing(qr) && return 0
 
     # shift to 0-indexing
     q(r) = qr[r+1] - 1
