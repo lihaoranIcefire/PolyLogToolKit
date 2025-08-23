@@ -2,6 +2,7 @@
 module LogToolKit
 
 using Combinatorics
+using Memoization
 
 export # export structs and functions as global
     Symb, ISymb, HSymb, Li,
@@ -60,16 +61,15 @@ function findfirst_subsequence(A::Union{Tuple{Vararg{T}}, Vector{T}},
     return indices[2:end] # doesn't include 0 of course
 end
 
+####################################################################################################
+# Abstract algebraic constructions
+####################################################################################################
+
 """
     monomial{T}
 
 Monomials with variables in type T, where T must be a comparable type
 """
-
-####################################################################################################
-# Abstract algebraic constructions
-####################################################################################################
-
 struct monomial{T} # T must be comparable type
     args::Tuple{Vararg{Pair{T, Int}}} # variables and their exponents
     deg::Int
@@ -227,6 +227,7 @@ Base.:^(a::polynomial{T}, n::Int) where {T <: Symb} =
 
 Iterated integral symbol
 `I(a_{i_0}; 0^{n_0-1}, ...; a_{i_{m+1}}) <==> (i_0, n_0, ..., i_{m+1})` is of weight `n_0 + ... + n_m - 1`
+Here `i_r` must be strictly increasing
 """
 struct ISymb <: Symb
     args::Tuple{Vararg{Int}}
@@ -235,7 +236,7 @@ struct ISymb <: Symb
     i::Function
     n::Function
 
-    function ISymb(args::Vararg{Int})
+    function ISymb(args::Vararg{Int}) # constructor
         if iseven(length(args))|| length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
@@ -243,12 +244,13 @@ struct ISymb <: Symb
         m = div(length(args), 2) - 1
         i(r) = args[1 + 2 * r]
         n(r) = args[2 + 2 * r]
+        weight = sum(n(r) for r in 0:m) - 1
 
         if m < 0 || any(n(r) < 1 for r in 1:m) # Check the validity of arguments
             throw(ArgumentError("The arguments are not valid"))
         end
 
-        return new(args, sum(n(r) for r in 0:m) - 1, m, i, n)
+        return new(args, weight, m, i, n)
     end
 end
 
@@ -274,6 +276,14 @@ Multiple polylogarithm symbols
 `[x_{i_1->i_2}, ..., x_{i_d->i_{d+1}}]_{n_1,...,n_d} <==> (i_1, n_1, i_2 - i_1, ..., n_d, i_{d+1} - i_d)`
 
 Or `(m_1, n_1, ..., m_{d+1})` so that `i_r = m_1 + ... + m_r`
+Here both `m` and `n` must be positive integers
+
+Define `hash_key` as the number of positive tuples with the same sum and prior (lexigraphical order) to t (assume `sum(t)=w` and `length(t)=d`)
+- Recall the total number of positive k-tuples with sum=w is binomial(w-1, k-1)
+- so the total number of positive tuples with sum=w is binom(w-1, 0) + ... + binom(w-1, w-1) = 2^(w-1)
+- therefore the total number of positive tuples start with < t_1 and sum=w would be 2^(w-t_1) + ... + 2^(w-2) = 2^(w-1) - 2^(w-t_1)
+- and the `hash_key` of t (needs simplification) would be 2^(w-1) - 2(w-t_1-1) - 2(w-t_1-t_2-1) - ... - 2(w-t_1-t_2-...-t_{d-1}-1) - 1
+- `hash_key` for `HSymb` uses the reversed `args` tuple
 """
 struct HSymb <: Symb
     args::Tuple{Vararg{Int}}
@@ -282,14 +292,15 @@ struct HSymb <: Symb
     i::Tuple{Vararg{Int}}
     m::Function
     n::Function
+    hash_key::UInt
 
     function HSymb(args::Vararg{Int})
         if iseven(length(args)) || length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
 
-        d = div(length(args), 2)
-        i = cumsum(args[1:2:end])
+        d = div(length(args), 2) # length(args) = 2*d + 1
+        i = cumsum(args[1:2:end]) # i(r) = m(1) + ... + m(r)
         m(r) = r == 0 ? 0 : args[2 * r - 1]
         n(r) = r == 0 ? 1 : args[2 * r]
         weight = n(1)==0 ? 1 : sum(n(r) for r in 1:d)
@@ -299,8 +310,16 @@ struct HSymb <: Symb
             throw(ArgumentError("The arguments are not valid"))
         end
 
+        w = weight + i[d+1]
+        hash_key = 2^(w-1)
+        for r in 2*d+1:-1:2
+            w -= args[r]
+            hash_key -= 2^(w-1)
+        end
+        hash_key -= 1
+
         # Return the final object
-        return new(args, weight, d, i, m, n)
+        return new(args, weight, d, i, m, n, hash_key)
     end
 end
 
@@ -334,10 +353,12 @@ function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRang
     )
 end
 
+"""
+original def of < for HSymb
+```
 Base.isless(a::HSymb, b::HSymb) = begin
     a.weight != b.weight && return a.weight < b.weight
     a.i[end] != b.i[end] && return a.i[end] < b.i[end]
-
     for r in 0: a.d-1
         if a.m(a.d-r) != b.m(b.d-r)
             return a.m(a.d-r) > b.m(b.d-r)
@@ -345,8 +366,15 @@ Base.isless(a::HSymb, b::HSymb) = begin
             return a.n(a.d-r) > b.n(b.d-r)
         end
     end
-
     return false
+end
+```
+now define < for HSymb using hash_key
+"""
+Base.isless(a::HSymb, b::HSymb) = begin
+    a.weight != b.weight && return a.weight < b.weight
+    a.i[end] != b.i[end] && return a.i[end] < b.i[end]
+    return a.hash_key > b.hash_key
 end
 
 """
@@ -497,22 +525,22 @@ function Phi_inv(H::Union{Number, HSymb, monomial{HSymb}, polynomial{HSymb}})
 end
 
 
+"""
+    fundamental_column(h::HSymb)
 
+Fundamental column of a HSymb
+"""
 function fundamental_column(h::HSymb)
     visited = Set{HSymb}()
     result = []
 
     function dfs(H::HSymb)
-        if H in visited
-            return
-        end
+        H in visited && return
 
         push!(result, H)
         push!(visited, H)
 
-        if H.d == 1 && H.n(1) == 1
-            return
-        end
+        H.d == 1 && H.n(1) == 1 && return
 
         for r in 1:H.d
             if H.n(r) > 1
