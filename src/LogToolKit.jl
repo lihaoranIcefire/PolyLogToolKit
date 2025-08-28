@@ -3,6 +3,8 @@ module LogToolKit
 
 using Combinatorics
 using Memoization
+using Documenter
+
 
 export # export structs and functions as global
     Symb, ISymb, HSymb, Li,
@@ -112,7 +114,7 @@ function lincomb{T}(args::Vararg{Union{T, Tuple{T, Number}, Pair{T, Number}}}; i
         counter[key] = get(counter, key, 0) + value # add value to counter, 0 for default
     end
     args = Tuple( sort( filter(x->x.second!=0, collect(counter)) ) ) # filter and sort variables
-    isempty(args) && return 1
+    isempty(args) && return 0
 
     return lincomb{T}(args, intercept)
 end
@@ -282,8 +284,8 @@ Define `hash_key` as the number of positive tuples with the same sum and prior (
 - Recall the total number of positive k-tuples with sum=w is binomial(w-1, k-1)
 - so the total number of positive tuples with sum=w is binom(w-1, 0) + ... + binom(w-1, w-1) = 2^(w-1)
 - therefore the total number of positive tuples start with < t_1 and sum=w would be 2^(w-t_1) + ... + 2^(w-2) = 2^(w-1) - 2^(w-t_1)
-- and the `hash_key` of t (needs simplification) would be 2^(w-1) - 2(w-t_1-1) - 2(w-t_1-t_2-1) - ... - 2(w-t_1-t_2-...-t_{d-1}-1) - 1
-- `hash_key` for `HSymb` uses the reversed `args` tuple
+- and the `hash_key` of t (needs simplification) would be 2^(w-1) - 2^(w-t_1-1) - 2^(w-t_1-t_2-1) - ... - 2^(w-t_1-t_2-...-t_{d-1}-1) - 1
+- `hash_key` for `HSymb` uses the reversed `args` tuple, and allow the tuple to be equal to the current one
 """
 struct HSymb <: Symb
     args::Tuple{Vararg{Int}}
@@ -316,7 +318,6 @@ struct HSymb <: Symb
             w -= args[r]
             hash_key -= 2^(w-1)
         end
-        hash_key -= 1
 
         # Return the final object
         return new(args, weight, d, i, m, n, hash_key)
@@ -341,8 +342,8 @@ function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRang
         throw(ArgumentError("The depth must be positive"))
     elseif length(n_args) != length(x_args)
         throw(ArgumentError("The depth is not in accordance with the x variables"))
-    elseif any(n <= 0 for n in n_args)
-        throw(ArgumentError("The weights must be positive"))
+    elseif any(n < 0 for n in n_args)
+        throw(ArgumentError("The weights must be nonnegative"))
     elseif first(x_args[1]) <= 0 || any(first(x_args[r]) != last(x_args[r-1]) for r in 2:length(x_args))
         throw(ArgumentError("The x variables is not valid"))
     end
@@ -396,7 +397,7 @@ julia> latex_repr([ISymb(0,0,1), ISymb(0,1,2)])
 function latex_repr(expr)
     if expr isa Rational # expr is a rational expression
         if denominator(expr)==1 # denominator as an integer is never negative, hence really integral
-            return string(expr)
+            return latex_repr(numerator(expr))
         else # real fractional
             return "\\frac{" *
                     latex_repr(numerator(expr)) *
@@ -423,10 +424,10 @@ function latex_repr(expr)
 
     elseif expr isa lincomb
         result = join([
-                    (t.second == 1 ? "" : "($(t.second))") * latex_repr(t.first) # coef = 1 is omitted
+                    (t.second == 1 ? "" : "($(latex_repr(t.second)))") * latex_repr(t.first) # coef = 1 is omitted
                     for t in expr.args
                     ], '+')
-        return (expr.intercept==0 ? "" : "($(expr.intercept))+") * result # intercept = 0 is omitted
+        return (expr.intercept==0 ? "" : "($(latex_repr(expr.intercept)))+") * result # intercept = 0 is omitted
 
     elseif expr isa tensor
         return join(map(x -> latex_repr(x), expr.args), "\\otimes ") # join by otimes
@@ -462,52 +463,61 @@ function differential(H::HSymb)
 
 end
 
-function Phi(I::Union{Number, ISymb, monomial{ISymb}, polynomial{ISymb}}, d::Int)
-    if I isa Number
+function Phi(I, d::Int)
+    if I isa Matrix
+        return map(x -> Phi(x, d), I)
+    elseif I isa polynomial
+        return I.intercept + sum( map(x -> x.second * Phi(x.first, d), I.args) )
+    elseif I isa monomial
+        return prod( map(x -> Phi(x.first, d)^(x.second), I.args) )
+    elseif I isa Number
         return I
-    elseif I isa monomial{ISymb}
-        return prod(map(x -> Phi(x.first, d)^(x.second), I.args))
-    elseif I isa polynomial{ISymb}
-        return I.intercept + sum(map(x -> x.second * Phi(x.first, d), I.args))
+    elseif !(I isa ISymb)
+        throw(ArgumentError("Unsupported type: $(typeof(I))"))
     end
 
-    if d + 1 < I.i(I.m+1) # check i_{m+1} <= d + 1
+    m, i, n = I.m, I.i, I.n
+
+    if d + 1 < i(m+1) # check i_{m+1} <= d + 1
         throw(ArgumentError("The depth is invalid"))
     end
 
-    if I.m == 0 && I.n(0) == 1
+    if m == 0 && n(0) <= 1 # I(a;b) = 1
         return 1
 
-    elseif I.i(0) == 0 && I.i(I.m+1) == 0
+    elseif m == 0 && i(0) == 0 # I(0;0^n;a_{i_1}) = ((-1)^(n-1) / n!) * [x_{i_1\to i_{d+1}}]_0^n, note a_{i_{m+1}} = 1
+        return i(1) == d+1 ? 0 : ((-1)^(n(0)-1) // factorial(n(0)-1)) * HSymb(i(1),0,d+1-i(1))^(n(0)-1)
+
+    elseif i(0) == 0 && i(m+1) == 0
         return 0
 
-    elseif I.i(0) > 0 && I.i(I.m+1) == 0
-        return (-1)^(I.weight) * Phi(ISymb(reverse(I.args)), d)
+    elseif i(0) > 0 && i(m+1) == 0
+        return (-1)^(I.weight) * Phi(ISymb(reverse(I.args)...), d)
 
-    elseif I.i(0) > 0 && I.i(I.m+1) > 0
+    elseif i(0) > 0 && i(m+1) > 0
         return sum(
             sum(
-                Phi(ISymb(I.args[1:2*k+1]..., p, 0), d) * Phi(ISymb(0, I.n(k)-p, I.args[2*k+3:end]...), d)
-                for p in 0:I.n(k)
+                Phi(ISymb(I.args[1:2*k+1]..., p, 0), d) * Phi(ISymb(0, n(k)+1-p, I.args[2*k+3:end]...), d)
+                for p in 1:n(k)
             )
-            for k in 0:I.m
+            for k in 0:m if n(k)>1
         )
 
-    elseif I.i(0) == 0 && I.i(I.m+1) == d + 1
+    elseif i(0) == 0 && i(m+1) == d + 1
         return sum(
-            (-1)^(I.n(0)+I.m-1) * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
-            * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-            for p in ordered_partitions(I.n(0)-1, I.m; minval = 0)
+            (-1)^(n(0)+m-1) * prod(binomial(n(r)+p[r]-1, p[r]) for r in 1:m)
+            * HSymb(i(1), vcat(([n(r)+p[r], i(r+1)-i(r)] for r in 1:m)...)...)
+            for p in ordered_partitions(n(0)-1, m; minval = 0)
         )
 
-    elseif I.i(0) == 0 && I.i(I.m+1) > 0
+    elseif i(0) == 0 && i(m+1) > 0
         return sum(
             sum(
-                (-1)^(I.n(0)+p0+I.m-1) * HSymb(I.i(I.m+1),1,d+1)^p0 * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
-                * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-                for p in ordered_partitions(I.n(0)-1-p0, I.m; minval = 0)
+                (-1)^(n(0)+p0+m-1) * HSymb(i(m+1),0,d+1-i(m+1))^p0 * prod(binomial(n(r)+p[r]-1, p[r]) for r in 1:m)
+                * HSymb(i(1), vcat(([n(r)+p[r], i(r+1)-i(r)] for r in 1:m)...)...)
+                for p in ordered_partitions(n(0)-1-p0, m; minval = 0)
             )
-            for p0 in 0:I.n(0)-1
+            for p0 in 0:n(0)-1
         )
     end
 end
@@ -516,9 +526,9 @@ function Phi_inv(H::Union{Number, HSymb, monomial{HSymb}, polynomial{HSymb}})
     if H isa Number
         return H
     elseif H isa monomial{HSymb}
-        return prod(map(x -> Phi_inv(x.first, d)^(x.second), H.args))
+        return prod(map(x -> Phi_inv(x.first)^(x.second), H.args))
     elseif H isa polynomial{HSymb}
-        return H.intercept + sum(map(x -> x.second * Phi_inv(x.first, d), H.args))
+        return H.intercept + sum(map(x -> x.second * Phi_inv(x.first), H.args))
     else
         return (-1)^H.d * ISymb(0, 1, vcat(([H.i[r], H.n(r)] for r in 1:H.d)...)..., H.i[end])
     end
