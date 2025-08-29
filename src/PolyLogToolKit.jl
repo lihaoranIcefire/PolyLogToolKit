@@ -1,152 +1,176 @@
+
 module LogToolKit
 
-
-
-export
-    Symb, ISymb, HSymb, Li,
-    monomial, lincomb, polynomial, tensor, Phi, Phi_inv, fundamental_column, complementary_entry
-    ordered_partitions, findfirst_subsequence
-
-
-
-using LaTeXStrings
-using Latexify
 using Combinatorics
+using Memoization
+using Documenter
+using SpecialFunctions
+
+export # export structs and functions as global
+    Symb, ISymb, HSymb, Li, invLi,
+    monomial, lincomb, polynomial, tensor, Phi, Phi_inv, fundamental_column, complementary_entry, VariationMatrix,
+    ordered_partitions, findfirst_subsequence, latex_repr, MonodromyMatrixEntry, MonodromyMatrix
 
 
-# ordered partitions of an integer
-function ordered_partitions(n::Int, k::Int; positive=true)
-    if positive
-        return union((unique(permutations(unordered_partition)) for unordered_partition in partitions(n + k, k))...)
-    else
-        return [partition .- 1 for partition in ordered_partitions(n, k)]
+####################################################################################################
+# Helper functions
+####################################################################################################
+
+"""
+    ordered_partitions(n, k, positive=true)
+
+Return the all ordered k-partitions of an integer of n, above a minimal value
+"""
+function ordered_partitions(n::Int, k::Int; minval::Int=1)
+    if k == 1 # no partition
+        return [[n]]
     end
+    result = Vector{Vector{Int}}()
+    for i in minval:(n - minval*(k-1)) # all possible first entry
+        for tail in ordered_partitions(n - i, k - 1; minval=minval) # all possible tails
+            push!(result, [i; tail...])
+        end
+    end
+    return result
 end
 
-# find the indices of the first occurence of a subsequence
-function findfirst_subsequence(A::Union{Tuple{Vararg{T}}, Vector{T}}, B::Union{Tuple{Vararg{T}}, Vector{T}}) where T
-    A, B = collect(A), collect(B)
-    indices = Int[0]
+"""
+    findfirst_subsequence(A, B)
+
+return the indices of the first occurence of a subsequence B in A, or nothing if none is found
+
+```julia
+julia> findfirst_subsequence((1,1,2,3,4,3),[1,3])
+2-element Vector{Int64}:
+ 1
+ 4
+
+julia> findfirst_subsequence((1,1,2,3,4,3),(1,5))
+```
+"""
+function findfirst_subsequence(A::Union{Tuple{Vararg{T}}, Vector{T}},
+                               B::Union{Tuple{Vararg{T}}, Vector{T}}) where T
+    A, B = collect(A), collect(B) # If A is a range, generator, or other iterable, collect(A) produces a concrete Array containing all elements
+    indices = Int[0] # the matching indices, the last element is supposed to be the last matching index, which initalizes to 0 as there is no matching index yet
     for b in B
-        ind = findfirst(a -> a == b, A[indices[end]+1:end])
-        if ind == nothing
-            indices = nothing
-            break
+        ind = findfirst(a -> a == b, A[indices[end]+1:end]) # find the next matching index
+        if isnothing(ind) # if nothing found, then it fails, return nothing
+            return nothing
         end
-        push!(indices, indices[end] + ind)
+        push!(indices, indices[end] + ind) # push the newly matched index
     end
-    
-    return indices == nothing ? nothing : indices[2:end]
+
+    return indices[2:end] # doesn't include 0 of course
 end
 
+"""
+Bernoulli numbers
+"""
+Bernoulli = Dict{UInt, Union{Int,Rational}}(0=>1//1)
+function bernoulli(n::UInt)
+    if !haskey(Bernoulli, n)
+        Bernoulli[n] = - sum( binomial(n, k) * Bernoulli[k] // (n-k+1) for k in 0:n-1 )
+    end
+    return Bernoulli[n]
+end
 
+####################################################################################################
+# Abstract algebraic constructions
+####################################################################################################
 
-abstract type Symb end
+"""
+    monomial{T}
 
-
-
-struct monomial{T}
-    # T must be comparable type that has the latex_repr attribute
-    args::Tuple{Vararg{Pair{T, Int}}}
+Monomials with variables in type T, where T must be a comparable type
+"""
+struct monomial{T} # T must be comparable type
+    args::Tuple{Vararg{Pair{T, Int}}} # variables and their exponents
     deg::Int
-    latex_repr::String
 end
 
-# constructor for monomial{T}, Int refers to the exponent
 function monomial{T}(args::Vararg{Union{Tuple{T, Int}, Pair{T, Int}, T}}) where T
-    # multiply the variables
     counter = Dict{T, Int}()
-    for var in args
-        (key, value) = typeof(var) <: T ? (var, 1) : var
-        counter[key] = get(counter, key, 0) + value
+    for var in args # multiply the variables
+        key, value = var isa T ? (var, 1) : var
+        counter[key] = get(counter, key, 0) + value # add value to counter, 0 for default
     end
+    args = Tuple( sort( filter(x->x.second!=0, collect(counter)) ) ) # filter and sort variables
+    isempty(args) && return 1
+    deg = sum(last, args) # sum the second exponents for degree
 
-    # sort the variables
-    args = Tuple(sort(filter(x->x.second!=0, collect(counter))))
-
-    # return 1 when the args is empty
-    if length(args) == 0
-        return 1
-    end
-
-    # compute the degree of the monomial
-    deg = sum([exponent for (_, exponent) in args])
-
-    # generate latex_repr
-    latex_repr = ""
-    for (var, exponent) in args
-        if exponent == 1
-            latex_repr *= "$(var.latex_repr)"
-        else
-            latex_repr *= "$(var.latex_repr)^{$(exponent)}"
-        end
-    end
-
-    return monomial{T}(args, deg, latex_repr)
+    return monomial{T}(args, deg)
 end
 
+"""
+    lincomb{T}
+
+Linear/affine combinations with terms in type T, where T must be a comparable type
+"""
 struct lincomb{T}
-    # T must be comparable type that has the latex_repr attribute
-    args::Tuple{Vararg{Pair{T, Number}}}
-    intercept::Number
-    latex_repr::String
+    args::Tuple{Vararg{Pair{T, Number}}} # variable and coefficient, coef is put as the second argument to ease sorting
+    intercept::Number # constant term
 end
+
+"""
+    polynomial{T}
+
+A polynomial in T is a linear/affine combination of monomials in T
+"""
 polynomial{T} = lincomb{Union{T, monomial{T}}}
 
-# constructor for lincomb, Number refers to the coefficient
-# Number is in the second argument to ease the sorting of variables
 function lincomb{T}(args::Vararg{Union{T, Tuple{T, Number}, Pair{T, Number}}}; intercept=0) where T
-    # add the variables
     counter = Dict{T, Number}()
-    for term in args
-        (key, value) = typeof(term) <: T ? (term, 1) : term
-        counter[key] = get(counter, key, 0) + value
+    for term in args # combine like terms
+        (key, value) = term isa T ? (term, 1) : term
+        counter[key] = get(counter, key, 0) + value # add value to counter, 0 for default
     end
+    args = Tuple( sort( filter(x->x.second!=0, collect(counter)) ) ) # filter and sort variables
+    isempty(args) && return 0
 
-    # sort the variables
-    args = Tuple(sort(filter(x->x.second!=0, collect(counter))))
-
-    # return the intercept when the args is empty
-    if length(args) == 0
-        return intercept
-    end
-
-    # generate latex_repr
-    argstr = String[]
-    if intercept != 0
-        push!(argstr, "($intercept)")
-    end
-    for term in args
-        if term.second == 1
-            push!(argstr, term.first.latex_repr)
-        else
-            push!(argstr, "($(term.second))" * term.first.latex_repr)
-        end
-    end
-    latex_repr = join(argstr, '+')
-
-    return lincomb{T}(args, intercept, latex_repr)
+    return lincomb{T}(args, intercept)
 end
 
-struct tensor{T}
-    # T must be a type that has the latex_repr attribute
+"""
+Bernoulli polynomial
+"""
+function bernoulli_polynomial(n::UInt, x::T) where T
+    n==0 && return 1
+    return polynomial{T}([monomial{T}(x=>k)=>(binomial(n,k)*bernoulli(n-k)) for k in 0:n]...)
+end
+
+"""
+    tensor{T}
+
+single tensor in type T, where T must be a comparable type that has the `latex_repr` attribute
+"""
+struct tensor{T} # T must be a type that has the latex_repr attribute
     args::Tuple{Vararg{T}}
-    latex_repr::String
 end
+"""
+    tensors{T}
+
+A linear combination of single tensors
+"""
 tensors{T} = lincomb{Union{T, tensor{T}}}
 
 # constructor for tensor{T}
 function tensor{T}(args::Vararg{T}) where T
-    if length(args) == 0
+    if isempty(args)
         return 1
     elseif length(args) == 1
         return args[1]
     else
-        return tensor{T}(args, join(map(x -> x.latex_repr, args), "\\otimes "))
+        return tensor{T}(args)
     end
 end
 
 
+"""
+    Symb
+
+An abstract type with instances called "symbols" that has no relations among themselves
+"""
+abstract type Symb end
 
 ## Overloading the Base operators ==, <, *, +, -, inv, ^
 
@@ -219,58 +243,40 @@ Base.:^(a::polynomial{T}, n::Int) where {T <: Symb} =
         temp * temp * (n % 2 == 0 ? 1 : a)
     end
 
-
-
 """
-    ISymb(args::Vararg{Int})
+    ISymb
 
-Return an Iterated integral symbol with args
+Iterated integral symbol
+`I(a_{i_0}; 0^{n_0-1}, ...; a_{i_{m+1}}) <==> (i_0, n_0, ..., i_{m+1})` is of weight `n_0 + ... + n_m - 1`
+Here `i_r` must be strictly increasing
 """
-
 struct ISymb <: Symb
     args::Tuple{Vararg{Int}}
     weight::Int
     m::Int
     i::Function
     n::Function
-    latex_repr::String
 
-    function ISymb(args::Vararg{Int})
-        # Validate the number of arguments
-        if length(args) % 2 == 0 || length(args) < 3
+    function ISymb(args::Vararg{Int}) # constructor
+        if iseven(length(args))|| length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
 
         m = div(length(args), 2) - 1
-        i(r) = r > 0 ? args[1 + 2 * r] : 0
+        i(r) = args[1 + 2 * r]
         n(r) = args[2 + 2 * r]
-        argstrs = String[]
+        weight = sum(n(r) for r in 0:m) - 1
 
-        # Check the validity of arguments
-        if m < 0 || any(n(r) < 1 for r in 1:m)
+        if m < 0 || any(n(r) < 1 for r in 1:m) # Check the validity of arguments
             throw(ArgumentError("The arguments are not valid"))
         end
 
-        # Form the latex string
-        for r in 0:m
-            push!(argstrs, "a_{$(i(r))}")
-            if n(r) == 2
-                push!(argstrs, "0")
-            elseif n(r) > 2
-                push!(argstrs, "0^{$(n(r)-1)}")
-            end
-        end
-        push!(argstrs, "a_{$(i(m+1))}")
-
-        # Return the final object
-        return new(args, sum(n(r) for r in 0:m) - 1, m, i, n, "I($(join(argstrs, ',')))")
+        return new(args, weight, m, i, n)
     end
 end
 
 Base.isless(a::ISymb, b::ISymb) = begin
-    if a.weight != b.weight
-        return a.weight < b.weight
-    end
+    a.weight != b.weight && return a.weight < b.weight
 
     for r in 0: a.m-1
         if a.i(a.m-r) != b.i(b.m-r)
@@ -283,6 +289,23 @@ Base.isless(a::ISymb, b::ISymb) = begin
     return a.i(0) < b.i(0)
 end
 
+"""
+    HSymb
+
+Multiple polylogarithm symbols
+
+`[x_{i_1->i_2}, ..., x_{i_d->i_{d+1}}]_{n_1,...,n_d} <==> (i_1, n_1, i_2 - i_1, ..., n_d, i_{d+1} - i_d)`
+
+Or `(m_1, n_1, ..., m_{d+1})` so that `i_r = m_1 + ... + m_r`
+Here both `m` and `n` must be positive integers
+
+Define `hash_key` as the number of positive tuples with the same sum and prior (lexigraphical order) to t (assume `sum(t)=w` and `length(t)=d`)
+- Recall the total number of positive k-tuples with sum=w is binomial(w-1, k-1)
+- so the total number of positive tuples with sum=w is binom(w-1, 0) + ... + binom(w-1, w-1) = 2^(w-1)
+- therefore the total number of positive tuples start with < t_1 and sum=w would be 2^(w-t_1) + ... + 2^(w-2) = 2^(w-1) - 2^(w-t_1)
+- and the `hash_key` of t (needs simplification) would be 2^(w-1) - 2^(w-t_1-1) - 2^(w-t_1-t_2-1) - ... - 2^(w-t_1-t_2-...-t_{d-1}-1) - 1
+- `hash_key` for `HSymb` uses the reversed `args` tuple, and allow the tuple to be equal to the current one
+"""
 struct HSymb <: Symb
     args::Tuple{Vararg{Int}}
     weight::Int
@@ -290,48 +313,56 @@ struct HSymb <: Symb
     i::Tuple{Vararg{Int}}
     m::Function
     n::Function
-    latex_repr::String
+    hash_key::UInt
 
     function HSymb(args::Vararg{Int})
-        # Validate the number of arguments
-        if length(args) % 2 == 0 || length(args) < 3
+        if iseven(length(args)) || length(args) < 3 # Validate the number of arguments
             throw(ArgumentError("The number of arguments should be odd and at least 3"))
         end
 
-        d = div(length(args), 2)
-        i = cumsum(args[1:2:end])
+        d = div(length(args), 2) # length(args) = 2*d + 1
+        i = cumsum(args[1:2:end]) # i(r) = m(1) + ... + m(r)
         m(r) = r == 0 ? 0 : args[2 * r - 1]
         n(r) = r == 0 ? 1 : args[2 * r]
         weight = n(1)==0 ? 1 : sum(n(r) for r in 1:d)
-        argstrs = String[]
-        indices = Int64[]
 
         # Check the validity of arguments
         if d <= 0 || any(m(r) < 1 for r in 1:d+1) || n(1)<0 || (d > 1 && any(n(r) < 1 for r in 1:d))
             throw(ArgumentError("The arguments are not valid"))
         end
 
-        # Form the latex string
-        for r in 1:d
-            push!(argstrs, "x_{$(i[r])\\to $(i[r+1])}")
-            push!(indices, n(r))
+        w = weight + i[d+1]
+        hash_key = 2^(w-1)
+        for r in 2*d+1:-1:2
+            w -= args[r]
+            hash_key -= 2^(w-1)
         end
 
         # Return the final object
-        return new(args, weight, d, i, m, n, "[$(join(argstrs, ','))]_{$(join(indices, ','))}")
+        return new(args, weight, d, i, m, n, hash_key)
     end
 end
 
-function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRange{Int}}}})
+"""
+    Li(n_args, x_args)
+
+Multiple polylogarithm symbols, `x_args` can be Int or UnitRange
+```julia
+julia> Li((1,1,2),(2:3,3:5,5)).latex_repr
+"[x_{2\\to 3},x_{3\\to 5},x_{5\\to 6}]_{1,1,2}"
+```
+"""
+function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRange{Int}}}})::HSymb
     # turn Int into UnitRange
-    x_args = Tuple(map(x -> x isa Int ? UnitRange{Int}(x,x+1) : x, x_args))
+    x_args = map(x -> x isa Int ? UnitRange{Int}(x,x+1) : x,
+                x_args) |> Tuple
     # examine the arguments
-    if length(n_args) == 0
+    if isempty(n_args)
         throw(ArgumentError("The depth must be positive"))
     elseif length(n_args) != length(x_args)
         throw(ArgumentError("The depth is not in accordance with the x variables"))
-    elseif any(n <= 0 for n in n_args)
-        throw(ArgumentError("The weights must be positive"))
+    elseif any(n < 0 for n in n_args)
+        throw(ArgumentError("The weights must be nonnegative"))
     elseif first(x_args[1]) <= 0 || any(first(x_args[r]) != last(x_args[r-1]) for r in 2:length(x_args))
         throw(ArgumentError("The x variables is not valid"))
     end
@@ -342,13 +373,32 @@ function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRang
     )
 end
 
-Base.isless(a::HSymb, b::HSymb) = begin
-    if a.weight != b.weight
-        return a.weight < b.weight
-    elseif a.i[end] != b.i[end]
-        return a.i[end] < b.i[end]
-    end
+"""
+inverted Li symbols
+"""
+function invLi(n::Tuple{Vararg{Int}}, x::Tuple{Vararg{Union{Int, UnitRange{Int}}}})
+    d = length(n)
+    d==0 && return 1
+    n = reverse(n)
+    x = reverse(x)
+    return sum( # (-1)^(n_{r+1}+...+n_d) Li_{n_r,...,n_1}(x_r^{-1},...,x_1^{-1}) Li(n_{r+1},...,n_d)(x_{r+1},...,x_d)
+                (-1)^sum(n[r+1:end]) * invLi(n[1:r],x[1:r]) * Li(n[r+1:end],x[r+1:end])
+                for r in 0:d-1
+            ) -
+            sum( sum(
+                (-1)^(sum(n)+sum(m[r+1:end])) // factorial(m[r]) *
+                prod(binomial(n[i]+m[i]-1,n[i]-1) for i in 1:d if i!=r) *
+                HSymb(1,0,d)^m[r] * invLi(n[1:r-1].+m[1:r-1],x[1:r]) * Li(n[r+1:end].+m[r+1:end],x[r+1:end])
+                for m in ordered_partitions(n[r], d; minval=0)
+            ) for r in 1:d)
+end
 
+"""
+original def of < for HSymb
+```
+Base.isless(a::HSymb, b::HSymb) = begin
+    a.weight != b.weight && return a.weight < b.weight
+    a.i[end] != b.i[end] && return a.i[end] < b.i[end]
     for r in 0: a.d-1
         if a.m(a.d-r) != b.m(b.d-r)
             return a.m(a.d-r) > b.m(b.d-r)
@@ -356,8 +406,90 @@ Base.isless(a::HSymb, b::HSymb) = begin
             return a.n(a.d-r) > b.n(b.d-r)
         end
     end
-
     return false
+end
+```
+now define < for HSymb using hash_key
+"""
+Base.isless(a::HSymb, b::HSymb) = begin
+    a.weight != b.weight && return a.weight < b.weight
+    a.i[end] != b.i[end] && return a.i[end] < b.i[end]
+    return a.hash_key > b.hash_key
+end
+
+"""
+    latex_repr
+
+return the latex representation of an object
+
+```julia
+julia> latex_repr([[1,2],[3,4]])
+"\\begin{bmatrix}\\begin{bmatrix}1 \\\\ 2\\end{bmatrix} \\\\ \\begin{bmatrix}3 \\\\ 4\\end{bmatrix}\\end{bmatrix}"
+
+julia> latex_repr(ISymb(0,0,1))
+"I(a_{0},a_{1})"
+
+julia> latex_repr([ISymb(0,0,1), ISymb(0,1,2)])
+"\\begin{bmatrix}I(a_{0},a_{1}) \\\\ I(a_{0},a_{2})\\end{bmatrix}"
+```
+"""
+function latex_repr(expr)
+    if expr isa Rational # expr is a rational expression
+        if denominator(expr)==1 # denominator as an integer is never negative, hence really integral
+            return latex_repr(numerator(expr))
+        else # real fractional
+            return "\\frac{" *
+                    latex_repr(numerator(expr)) *
+                    "}{" *
+                    latex_repr(denominator(expr)) *
+                    "}"
+        end
+
+    elseif expr isa Vector || expr isa Tuple
+        return "\\begin{bmatrix}" *
+                join(map(latex_repr, expr), " \\\\ ") * # entries divided by '\\'
+                "\\end{bmatrix}"
+
+    elseif expr isa Matrix
+        m, n = size(expr)
+        return "\\begin{bmatrix}" *
+                join([join(map(latex_repr, row), " & ") # entries connected by '&'
+                    for row in eachrow(expr)], " \\\\ ") * # rows divided by '\\'
+                "\\end{bmatrix}"
+
+    elseif expr isa monomial
+        return join([latex_repr(v) * (e == 1 ? "" : "^{$e}") # exponent = 1 is omitted
+                    for (v, e) in expr.args])
+
+    elseif expr isa lincomb
+        result = join([
+                    (t.second == 1 ? "" : "($(latex_repr(t.second)))") * latex_repr(t.first) # coef = 1 is omitted
+                    for t in expr.args
+                    ], '+')
+        return (expr.intercept==0 ? "" : "($(latex_repr(expr.intercept)))+") * result # intercept = 0 is omitted
+
+    elseif expr isa tensor
+        return join(map(x -> latex_repr(x), expr.args), "\\otimes ") # join by otimes
+
+    elseif expr isa ISymb
+        argstrs = [
+            "a_{$(expr.i(r))}" * (expr.n(r) == 2 ? ",0" : expr.n(r) > 2 ? ",0^{$(expr.n(r)-1)}" : "")
+            for r in 0:expr.m
+        ]
+        push!(argstrs, "a_{$(expr.i(expr.m+1))}") # add a_{i_{m+1}} at the end
+        return "I($(join(argstrs, ',')))"
+
+    elseif expr isa HSymb
+        argstrs = ["x_{$(expr.i[r])\\to $(expr.i[r+1])}" for r in 1:expr.d]
+        indices = [expr.n(r) for r in 1:expr.d]
+        return "[$(join(argstrs, ','))]_{$(join(indices, ','))}"
+
+    elseif expr isa Number
+        return string(expr)
+
+    else throw(ArgumentError("No LaTeX representations!"))
+
+    end
 end
 
 function partial_differential(H::HSymb, r::Int)
@@ -370,86 +502,100 @@ function differential(H::HSymb)
 
 end
 
-function Phi(I::Union{Number, ISymb, monomial{ISymb}, polynomial{ISymb}}, d::Int)
-    if I isa Number
+function Phi(I, d::Int)
+    if I isa Matrix
+        return map(x -> Phi(x, d), I)
+    elseif I isa polynomial
+        return I.intercept + sum( map(x -> x.second * Phi(x.first, d), I.args) )
+    elseif I isa monomial
+        return prod( map(x -> Phi(x.first, d)^(x.second), I.args) )
+    elseif I isa Number
         return I
-    elseif I isa monomial{ISymb}
-        return prod(map(x -> Phi(x.first, d)^(x.second), I.args))
-    elseif I isa polynomial{ISymb}
-        return I.intercept + sum(map(x -> x.second * Phi(x.first, d), I.args))
+    elseif !(I isa ISymb)
+        throw(ArgumentError("Unsupported type: $(typeof(I))"))
     end
 
-    # check i_{m+1} <= d + 1
-    if d + 1 < I.i(I.m+1)
+    m, i, n = I.m, I.i, I.n # drop I.
+
+    # test validity of arguments
+    if issorted(map(i, 0:m+1); lt = <=) # i is strictly increasing
+        inverted = false
+    elseif issorted(map(i, 1:m+1); lt = >=) && (i(0)==0 || i(0) > i(1)) # i is strictly decreasing, except that i(0) can be 0
+        inverted = true
+    elseif d + 1 < max(i(0),i(1),i(m+1)) # check i_{m+1} <= d + 1
         throw(ArgumentError("The depth is invalid"))
+    else
+        throw(ArgumentError("cannot be mapped, invalid i"))
     end
 
-    if I.m == 0 && I.n(1) == 1
+    if m == 0 && n(0) <= 1 # I(a;b) --> 1
         return 1
 
-    elseif I.i(0) == 0 && I.i(I.m+1) == 0
+    # elseif m == 0 && i(0) == 0 # I(0;0^n;a_{i_1}) = ((-1)^(n-1) / n!) * [x_{i_1\to i_{d+1}}]_0^n, note a_{i_{m+1}} = 1
+    #     return i(1) == d+1 ? 0 : ((-1)^(n(0)-1) // factorial(n(0)-1)) * HSymb(i(1),0,d+1-i(1))^(n(0)-1)
+
+    elseif i(0) == 0 && i(m+1) == 0 # I(0;...;0) --> 0
         return 0
 
-    elseif I.i(0) > 0 && I.i(I.m+1) == 0
-        return (-1)^(I.weight) * Phi(ISymb(reverse(I.args)), d)
+    elseif i(0) > 0 && i(m+1) == 0 # I(a_{i_0};0^{n_0-1},...;0) --> (-1)^(n_0+...+n_m-1) I(0;...,0^{n_0-1};a_{i_0})
+        return (-1)^(I.weight) * Phi(ISymb(reverse(I.args)...), d)
 
-    elseif I.i(0) > 0 && I.i(I.m+1) > 0
+    elseif i(0) > 0 && i(m+1) > 0
         return sum(
             sum(
-                Phi(ISymb(I.args[1:2*k+1]..., p, 0), d) * Phi(ISymb(0, I.n(k)-p, I.args[2*k+3:end]...), d)
-                for p in 0:I.n(k)
+                Phi(ISymb(I.args[1:2*k+1]..., p, 0), d) * Phi(ISymb(0, n(k)+1-p, I.args[2*k+3:end]...), d)
+                for p in 1:n(k)
             )
-            for k in 0:I.m
+            for k in 0:m
         )
 
-    elseif I.i(0) == 0 && I.i(I.m+1) == d + 1
+    elseif i(0) == 0 && i(m+1) == d + 1 # a_{d+1} = 1
         return sum(
-            (-1)^(I.n(0)+I.m-1) * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
-            * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-            for p in ordered_partitions(I.n(0)-1, I.m; positive = false)
+            (-1)^(n(0)+m-1) * prod(binomial(n(r)+p[r]-1, p[r]) for r in 1:m)
+            * HSymb(i(1), vcat(([n(r)+p[r], i(r+1)-i(r)] for r in 1:m)...)...)
+            for p in ordered_partitions(n(0)-1, m; minval = 0)
         )
-        
-    elseif I.i(0) == 0 && I.i(I.m+1) > 0
-        return sum(
-            sum(
-                (-1)^(I.n(0)+p0+I.m-1) * HSymb(I.i(I.m+1),1,d+1)^p0 * prod(binomial(I.n(r)+p[r]-1, p[r]) for r in 1:I.m)
-                * HSymb(I.i(1), vcat(([I.n(r)+p[r], I.i(r+1)-I.i(r)] for r in 1:I.m)...)...)
-                for p in ordered_partitions(I.n(0)-1-p0, I.m; positive = false)
-            )
-            for p0 in 0:I.n(0)-1
-        )
+
+    elseif i(0) == 0 && i(m+1) > 0
+        return sum( sum(
+                (-1)^(n(0)+p0+m-1) * HSymb(i(m+1),0,d+1-i(m+1))^p0 * prod(binomial(n(r)+p[r]-1, p[r]) for r in 1:m) * (
+                    inverted ? invLi((n(r)+p(r) for r in 1:m)..., (i(r+1)-1:i(r) for r in 1:m)) :
+                    HSymb(i(1), vcat(([n(r)+p[r], i(r+1)-i(r)] for r in 1:m)...)...)
+                )
+                for p in ordered_partitions(n(0)-1-p0, m; minval = 0)
+            ) for p0 in 0:n(0)-1 )
     end
 end
 
 function Phi_inv(H::Union{Number, HSymb, monomial{HSymb}, polynomial{HSymb}})
     if H isa Number
-        return I
+        return H
     elseif H isa monomial{HSymb}
-        return prod(map(x -> Phi_inv(x.first, d)^(x.second), H.args))
+        return prod(map(x -> Phi_inv(x.first)^(x.second), H.args))
     elseif H isa polynomial{HSymb}
-        return H.intercept + sum(map(x -> x.second * Phi_inv(x.first, d), H.args))
+        return H.intercept + sum(map(x -> x.second * Phi_inv(x.first), H.args))
     else
         return (-1)^H.d * ISymb(0, 1, vcat(([H.i[r], H.n(r)] for r in 1:H.d)...)..., H.i[end])
     end
 end
 
 
+"""
+    fundamental_column(h::HSymb)
 
+Fundamental column of a HSymb
+"""
 function fundamental_column(h::HSymb)
     visited = Set{HSymb}()
     result = []
 
     function dfs(H::HSymb)
-        if H in visited
-            return
-        end
+        H in visited && return
 
         push!(result, H)
         push!(visited, H)
 
-        if H.d == 1 && H.n(1) == 1
-            return
-        end
+        H.d == 1 && H.n(1) == 1 && return
 
         for r in 1:H.d
             if H.n(r) > 1
@@ -475,9 +621,11 @@ function complementary_entry(a::Union{HSymb, Int}, b::Union{HSymb, Int})
     p, m = a.n, b.n
 
     # q_r sequence
-    qr = findfirst_subsequence(map(j, 0:l+1), map(i, 0:k+1)) .- 1
+    qr = findfirst_subsequence(map(j, 0:l+1), map(i, 0:k+1))
+    isnothing(qr) && return 0
+
     # shift to 0-indexing
-    q(r) = qr[r+1]
+    q(r) = qr[r+1] - 1
 
     # I^{sigma_0^{m_r}}(...)
     function Isigma(r::Int)
@@ -504,6 +652,84 @@ function complementary_entry(a::Union{HSymb, Int}, b::Union{HSymb, Int})
     end
 
     return (-1)^(l-k) * prod(Isigma(r) for r in 0:k)
+end
+
+function VariationMatrix(H::HSymb)
+    fun_col = fundamental_column(H)
+    return [
+        if j == 1
+            Phi_inv(fun_col[i])
+        elseif i < j
+            0
+        elseif i == j
+            1
+        else
+            complementary_entry(fun_col[i], fun_col[j])
+        end
+        for i in 1:length(fun_col), j in 1:length(fun_col)
+    ]
+end
+
+# This is M_{w,v}^{(i_0)}
+function MonodromyMatrixEntry(w0::Union{HSymb,Int}, v0::Union{HSymb,Int}, i0::Int)
+    # turn HSymb into ISymb
+    if w0 isa Int
+        return 0
+    end
+    w = ISymb(0, 1, vcat(([w0.i[r], w0.n(r)] for r in 1:w0.d)...)..., w0.i[end])
+    j, p, l = w.i, w.n, w.m
+    v = v0 isa Int ? ISymb(0,0,w0.i[end]) : ISymb(0, 1, vcat(([v0.i[r], v0.n(r)] for r in 1:v0.d)...)..., v0.i[end])
+    i, m, k = v.i, v.n, v.m
+    r = findfirst(x -> i0<i(x), 1:k+1) - 1
+    qr = p(l-k+r) - m(r)
+    if any(j(s)!=i(s) for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
+        any(j(l-s)!=i(k-s) for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
+        qr<0 || sum((p(s)-1 for s in r:l-k+r-1); init=0)!=0
+        # so that extra sigmas are between sigma_{i_r} and sigma_{i_{r+1}} and q_r>=0
+        return 0
+    end
+    theta = sum((j(s) for s in r+1:l-k+r); init=0)
+    return qr>1 ? (-1)^(k+theta) // factorial(qr) : (-1)^(k+theta)
+end
+
+# This is M_{w,v}^{(i_0,j_0)}
+function MonodromyMatrixEntry(w0::Union{HSymb,Int}, v0::Union{HSymb,Int}, i0::Int, j0::Int)
+    if i0 > j0
+        return 0
+    end
+    # turn HSymb into ISymb
+    if w0 isa Int
+        return 0
+    end
+    w = ISymb(0, 1, vcat(([w0.i[r], w0.n(r)] for r in 1:w0.d)...)..., w0.i[end])
+    j, p, l = w.i, w.n, w.m
+    v = v0 isa Int ? ISymb(0,0,w0.i[end]) : ISymb(0, 1, vcat(([v0.i[r], v0.n(r)] for r in 1:v0.d)...)..., v0.i[end])
+    i, m, k = v.i, v.n, v.m
+    r = findfirst(x -> i0<=i(x), 1:k+1)
+    if any(j(s)!=i(s) for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
+        any(j(l-s)!=i(k-s) for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
+        sum((p(s)-1 for s in r:l-k+r-1); init=0)!=0
+        # so that extra sigmas are between sigma_{i_r} and sigma_{i_{r+1}}
+        return 0
+    end
+    theta = sum((j(s) for s in r+1:l-k+r); init=0) # this is suppose to be sum(delta*theta)+delta
+    if i0 == i(r) && j0+1 < i(r+1)
+        return (-1)^(k+theta-j(l-k+r))
+    elseif j0+1 == i(r+1) && i(r) < i0
+        return (-1)^(k+theta)
+    else
+        return 0
+    end
+end
+
+function MonodromyMatrix(H::HSymb, i0::Int)
+    L = fundamental_column(H)
+    return [(i > j ? MonodromyMatrixEntry(L[i], L[j], i0) : Int(i==j)) for i in 1:length(L), j in 1:length(L)]
+end
+
+function MonodromyMatrix(H::HSymb, i0::Int, j0::Int)
+    L = fundamental_column(H)
+    return [(i > j ? MonodromyMatrixEntry(L[i], L[j], i0, j0) : Int(i==j)) for i in 1:length(L), j in 1:length(L)]
 end
 
 end
