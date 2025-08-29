@@ -352,13 +352,13 @@ julia> Li((1,1,2),(2:3,3:5,5)).latex_repr
 "[x_{2\\to 3},x_{3\\to 5},x_{5\\to 6}]_{1,1,2}"
 ```
 """
-function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRange{Int}}}})::HSymb
+function Li(n_args::Tuple{Vararg{Int}}, x_args::Tuple{Vararg{Union{Int, UnitRange{Int}}}})
     # turn Int into UnitRange
     x_args = map(x -> x isa Int ? UnitRange{Int}(x,x+1) : x,
                 x_args) |> Tuple
     # examine the arguments
     if isempty(n_args)
-        throw(ArgumentError("The depth must be positive"))
+        return 1
     elseif length(n_args) != length(x_args)
         throw(ArgumentError("The depth is not in accordance with the x variables"))
     elseif any(n < 0 for n in n_args)
@@ -379,16 +379,14 @@ inverted Li symbols
 function invLi(n::Tuple{Vararg{Int}}, x::Tuple{Vararg{Union{Int, UnitRange{Int}}}})
     d = length(n)
     d==0 && return 1
-    n = reverse(n)
-    x = reverse(x)
-    return sum( # (-1)^(n_{r+1}+...+n_d) Li_{n_r,...,n_1}(x_r^{-1},...,x_1^{-1}) Li(n_{r+1},...,n_d)(x_{r+1},...,x_d)
-                (-1)^sum(n[r+1:end]) * invLi(n[1:r],x[1:r]) * Li(n[r+1:end],x[r+1:end])
+    return - sum( # (-1)^(n_{r+1}+...+n_d) Li_{n_r,...,n_1}(x_r^{-1},...,x_1^{-1}) Li(n_{r+1},...,n_d)(x_{r+1},...,x_d)
+                (-1)^sum(n[r+1:d]; init=0) * invLi(n[1:r],x[1:r]) * Li(n[r+1:d],x[r+1:d])
                 for r in 0:d-1
             ) -
             sum( sum(
-                (-1)^(sum(n)+sum(m[r+1:end])) // factorial(m[r]) *
-                prod(binomial(n[i]+m[i]-1,n[i]-1) for i in 1:d if i!=r) *
-                HSymb(1,0,d)^m[r] * invLi(n[1:r-1].+m[1:r-1],x[1:r]) * Li(n[r+1:end].+m[r+1:end],x[r+1:end])
+                (-1)^(sum(n)+sum(m[r+1:d]; init=0)) // factorial(m[r]) *
+                prod(binomial(n[i]+m[i]-1,n[i]-1) for i in 1:d if i!=r; init=1) *
+                HSymb(1,0,d)^m[r] * invLi(Tuple(n[k]+m[k] for k in 1:r-1),x[1:r-1]) * Li(Tuple(n[k]+m[k] for k in r+1:d),x[r+1:d])
                 for m in ordered_partitions(n[r], d; minval=0)
             ) for r in 1:d)
 end
@@ -480,7 +478,7 @@ function latex_repr(expr)
         return "I($(join(argstrs, ',')))"
 
     elseif expr isa HSymb
-        argstrs = ["x_{$(expr.i[r])\\to $(expr.i[r+1])}" for r in 1:expr.d]
+        argstrs = [(expr.i[r]+1==expr.i[r+1] ? "x_{$(expr.i[r])}" : "x_{$(expr.i[r])\\to $(expr.i[r+1])}") for r in 1:expr.d]
         indices = [expr.n(r) for r in 1:expr.d]
         return "[$(join(argstrs, ','))]_{$(join(indices, ','))}"
 
@@ -518,9 +516,9 @@ function Phi(I, d::Int)
     m, i, n = I.m, I.i, I.n # drop I.
 
     # test validity of arguments
-    if issorted(map(i, 0:m+1); lt = <=) # i is strictly increasing
+    if issorted(map(i, 0:m); lt = <=) && (i(m+1)==0 || i(m+1) > i(m)) # i is strictly increasing except i(m+1) can be 0
         inverted = false
-    elseif issorted(map(i, 1:m+1); lt = >=) && (i(0)==0 || i(0) > i(1)) # i is strictly decreasing, except that i(0) can be 0
+    elseif issorted(map(i, 1:m+1); lt = >=) && (i(0)==0 || i(0) > i(1)) # i is strictly decreasing, except i(0) can be 0
         inverted = true
     elseif d + 1 < max(i(0),i(1),i(m+1)) # check i_{m+1} <= d + 1
         throw(ArgumentError("The depth is invalid"))
@@ -531,8 +529,8 @@ function Phi(I, d::Int)
     if m == 0 && n(0) <= 1 # I(a;b) --> 1
         return 1
 
-    # elseif m == 0 && i(0) == 0 # I(0;0^n;a_{i_1}) = ((-1)^(n-1) / n!) * [x_{i_1\to i_{d+1}}]_0^n, note a_{i_{m+1}} = 1
-    #     return i(1) == d+1 ? 0 : ((-1)^(n(0)-1) // factorial(n(0)-1)) * HSymb(i(1),0,d+1-i(1))^(n(0)-1)
+    elseif m == 0 && i(0) == 0 # I(0;0^n;a_{i_1}) = ((-1)^(n-1) / n!) * [x_{i_1\to i_{d+1}}]_0^n, note a_{i_{m+1}} = 1
+        return i(1) == d+1 ? 0 : ((-1)^(n(0)-1) // factorial(n(0)-1)) * HSymb(i(1),0,d+1-i(1))^(n(0)-1)
 
     elseif i(0) == 0 && i(m+1) == 0 # I(0;...;0) --> 0
         return 0
@@ -559,7 +557,7 @@ function Phi(I, d::Int)
     elseif i(0) == 0 && i(m+1) > 0
         return sum( sum(
                 (-1)^(n(0)+p0+m-1) * HSymb(i(m+1),0,d+1-i(m+1))^p0 * prod(binomial(n(r)+p[r]-1, p[r]) for r in 1:m) * (
-                    inverted ? invLi((n(r)+p(r) for r in 1:m)..., (i(r+1)-1:i(r) for r in 1:m)) :
+                    inverted ? invLi(Tuple(n(r)+p[r] for r in 1:m), Tuple(i(r+1):i(r) for r in m:-1:1)) :
                     HSymb(i(1), vcat(([n(r)+p[r], i(r+1)-i(r)] for r in 1:m)...)...)
                 )
                 for p in ordered_partitions(n(0)-1-p0, m; minval = 0)
