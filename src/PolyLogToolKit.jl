@@ -711,23 +711,35 @@ function MonodromyMatrixEntry(w::Union{HSymb,Int}, w0::Union{HSymb,Int}, i0::Int
     i0 > j0 && return 0
     j, p, l = w.i, w.n, w.d
     if w0 isa Int
-        i = j[l+1]
+        i = [j[l+1]]
         m(x) = x==0 ? 1 : 0
         k = 0
     else
         i, m, k = w0.i, w0.n, w0.d
     end
     r = findfirst(x -> i0<i[x], 1:k+1) - 1 # such that i_r <= i0 < i_{r+1}, i_0=0 is allowed here
-    if any(j[s]!=i[s] for s in 1:r) || any(m(s)!=p(s) for s in 1:r) ||
+    if any(j[s]!=i[s] for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
         any(j[l-s]!=i[k-s] for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
-        sum((p(s)-1 for s in r+1:l-k+r); init=0)!=0
+        sum(p(s)-1 for s in r:l-k+r)!=m(r)-1
         # so that extra sigmas are between sigma_{i_r} and sigma_{i_{r+1}}
         return 0
     end
-    if i0 == (r>0 ? i[r] : 0) && j0+1 < i[r+1] # l-k-1 is the sum of thetas
-        return (-1)^(l-k-1)
+    if i0 == (r>0 ? i[r] : 0) && j0+1 < i[r+1]
+        if j[r+1]<=i0 || j[l-k+r]!=j0+1 # make sure sigma_{j0+1} is present and extra sigmas are within i0+1 -> j0+1
+            return 0
+        elseif p(l-k+r)!=m(r) # sigma_0^{m_r-1} is right after sigma_{j0+1}
+            return 0
+        else
+            return (-1)^(l-k-1) # l-k-1 is the sum of thetas
+        end
     elseif j0+1 == i[r+1] && (r>0 ? i[r] : 0) < i0
-        return (-1)^(l-k)
+        if j[r+1]!=i0 || j[l-k+r]>j0 # make sure sigma_{i0} is present and extra sigmas are within i0 -> j0
+            return 0
+        elseif p(r)!=m(r) # sigma_0^{m_r-1} is right after sigma_{i_r}
+            return 0
+        else
+            return (-1)^(l-k)
+        end
     else
         return 0
     end
