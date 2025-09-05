@@ -460,11 +460,31 @@ function latex_repr(expr)
                     for (v, e) in expr.args])
 
     elseif expr isa lincomb
-        result = join([
-                    (t.second == 1 ? "" : "($(latex_repr(t.second)))") * latex_repr(t.first) # coef = 1 is omitted
-                    for t in expr.args
-                    ], '+')
-        return (expr.intercept==0 ? "" : "($(latex_repr(expr.intercept)))+") * result # intercept = 0 is omitted
+        buf = IOBuffer()
+        # handle intercept first
+        if expr.intercept != 0
+            print(buf, latex_repr(expr.intercept))
+        end
+
+        for (term, coef) in expr.args
+            term = latex_repr(term)
+
+            if coef == 1
+                s = term
+            elseif coef < 0
+                s = "-" * (coef==-1 ? "" : latex_repr(-coef)) * term   # negative number, no "+-"
+            else
+                s = latex_repr(coef) * term
+            end
+
+            # add "+" if buffer already has content and coef>0
+            if coef > 0 && position(buf) > 0
+                print(buf, "+")
+            end
+            print(buf, s)
+        end
+
+        return String(take!(buf))
 
     elseif expr isa tensor
         return join(map(x -> latex_repr(x), expr.args), "\\otimes ") # join by otimes
@@ -668,53 +688,46 @@ function VariationMatrix(H::HSymb)
     ]
 end
 
-# This is M_{w,v}^{(i_0)}
-function MonodromyMatrixEntry(w0::Union{HSymb,Int}, v0::Union{HSymb,Int}, i0::Int)
-    # turn HSymb into ISymb
-    if w0 isa Int
-        return 0
-    end
-    w = ISymb(0, 1, vcat(([w0.i[r], w0.n(r)] for r in 1:w0.d)...)..., w0.i[end])
-    j, p, l = w.i, w.n, w.m
-    v = v0 isa Int ? ISymb(0,0,w0.i[end]) : ISymb(0, 1, vcat(([v0.i[r], v0.n(r)] for r in 1:v0.d)...)..., v0.i[end])
-    i, m, k = v.i, v.n, v.m
-    r = findfirst(x -> i0<i(x), 1:k+1) - 1
+# This is M_{w,w0}^{(i_0)}
+function MonodromyMatrixEntry(w::Union{HSymb,Int}, w0::Union{HSymb,Int}, i0::Int)
+    w0 isa Int && return 0 # i_r doesn't exist
+    j, p, l = w.i, w.n, w.d
+    i, m, k = w0.i, w0.n, w0.d
+    r = findfirst(x -> i0<i[x], 1:k+1) - 1 # such that i_r <= i0 < i_{r+1}
+    r<1 && return 0 # r=0 should not be considered, so i_r doesn't exist
     qr = p(l-k+r) - m(r)
-    if any(j(s)!=i(s) for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
-        any(j(l-s)!=i(k-s) for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
-        qr<0 || sum((p(s)-1 for s in r:l-k+r-1); init=0)!=0
+    if any(j[s]!=i[s] for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
+        any(j[l-s]!=i[k-s] for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
+        qr<0 || sum((p(s)-1 for s in r:l-k+r-1); init=0)!=0 ||
+        (qr==0 && i0+1==i[r+1])
         # so that extra sigmas are between sigma_{i_r} and sigma_{i_{r+1}} and q_r>=0
         return 0
     end
-    theta = sum((j(s) for s in r+1:l-k+r); init=0)
-    return qr>1 ? (-1)^(k+theta) // factorial(qr) : (-1)^(k+theta)
+    return (-1)^(l-k) // factorial(qr) # l-k is the sum of thetas
 end
 
-# This is M_{w,v}^{(i_0,j_0)}
-function MonodromyMatrixEntry(w0::Union{HSymb,Int}, v0::Union{HSymb,Int}, i0::Int, j0::Int)
-    if i0 > j0
-        return 0
-    end
-    # turn HSymb into ISymb
+# This is M_{w,w0}^{(i_0,j_0)}
+function MonodromyMatrixEntry(w::Union{HSymb,Int}, w0::Union{HSymb,Int}, i0::Int, j0::Int)
+    i0 > j0 && return 0
+    j, p, l = w.i, w.n, w.d
     if w0 isa Int
-        return 0
+        i = j[l+1]
+        m(x) = x==0 ? 1 : 0
+        k = 0
+    else
+        i, m, k = w0.i, w0.n, w0.d
     end
-    w = ISymb(0, 1, vcat(([w0.i[r], w0.n(r)] for r in 1:w0.d)...)..., w0.i[end])
-    j, p, l = w.i, w.n, w.m
-    v = v0 isa Int ? ISymb(0,0,w0.i[end]) : ISymb(0, 1, vcat(([v0.i[r], v0.n(r)] for r in 1:v0.d)...)..., v0.i[end])
-    i, m, k = v.i, v.n, v.m
-    r = findfirst(x -> i0<=i(x), 1:k+1)
-    if any(j(s)!=i(s) for s in 1:r) || any(m(s)!=p(s) for s in 1:r-1) ||
-        any(j(l-s)!=i(k-s) for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
-        sum((p(s)-1 for s in r:l-k+r-1); init=0)!=0
+    r = findfirst(x -> i0<i[x], 1:k+1) - 1 # such that i_r <= i0 < i_{r+1}, i_0=0 is allowed here
+    if any(j[s]!=i[s] for s in 1:r) || any(m(s)!=p(s) for s in 1:r) ||
+        any(j[l-s]!=i[k-s] for s in 0:k-r-1) || any(p(l-s)!=m(k-s) for s in 0:k-r-1) ||
+        sum((p(s)-1 for s in r+1:l-k+r); init=0)!=0
         # so that extra sigmas are between sigma_{i_r} and sigma_{i_{r+1}}
         return 0
     end
-    theta = sum((j(s) for s in r+1:l-k+r); init=0) # this is suppose to be sum(delta*theta)+delta
-    if i0 == i(r) && j0+1 < i(r+1)
-        return (-1)^(k+theta-j(l-k+r))
-    elseif j0+1 == i(r+1) && i(r) < i0
-        return (-1)^(k+theta)
+    if i0 == (r>0 ? i[r] : 0) && j0+1 < i[r+1] # l-k-1 is the sum of thetas
+        return (-1)^(l-k-1)
+    elseif j0+1 == i[r+1] && (r>0 ? i[r] : 0) < i0
+        return (-1)^(l-k)
     else
         return 0
     end
